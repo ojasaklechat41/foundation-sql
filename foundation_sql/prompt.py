@@ -6,6 +6,27 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
+# Add this constant at the top
+DEFAULT_SCHEMA_SYSTEM_PROMPT = """
+You are an expert SQL database schema designer. Given a Pydantic model, generate a CREATE TABLE statement that can work across SQLite and PostgreSQL.
+
+Rules:
+1. Use appropriate SQL data types that work in both SQLite and PostgreSQL
+2. Add primary key constraints where appropriate
+3. Add foreign key constraints if referenced models are detected
+4. Use VARCHAR for string fields with reasonable lengths
+5. Use TIMESTAMP for datetime fields
+6. Add NOT NULL constraints for required fields
+7. Add DEFAULT values where appropriate
+8. Use CHECK constraints for enums/choices
+9. Always use IF NOT EXISTS clause
+10. Use snake_case for table and column names
+11. Add created_at and updated_at timestamp fields automatically
+12. For string IDs, use VARCHAR(36) assuming UUID format
+13. For integer IDs, use INTEGER with AUTO_INCREMENT/SERIAL behavior
+
+Respond with only the SQL CREATE TABLE statement, no explanations.
+"""
 
 class FunctionSpec:
 
@@ -26,7 +47,6 @@ class FunctionSpec:
         if self.return_type in [NoneType, int, str, bool]:
             return {}
         return {k: str(v) for k, v in self.return_type.model_fields.items()}
-
 
     def _extract_kwargs(self, func: Callable) -> Dict[str, Type]:
         """
@@ -62,7 +82,7 @@ class FunctionSpec:
 
         return json.dumps({k: serialize_value(v) for k, v in kwargs.items()}, indent=2)
 
-    def _extract_return_model(self, func: Callable) -> (Type[BaseModel], Optional[str]):
+    def _extract_return_model(self, func: Callable) -> (Type[BaseModel], Optional[str]): # type: ignore
         """
         Extract the return model type from a function's type annotations.
         
@@ -96,7 +116,6 @@ class FunctionSpec:
             return_type = return_type.__args__[0]
         
         return return_type, wrapper
-
 
 
 class SQLPromptGenerator:
@@ -148,7 +167,6 @@ When running it, following error was encountered:
 Review the error and suggest an improved SQL template that works.
 """
 
-        
         return f"""
 {self.system_prompt}
 ----------------
@@ -166,3 +184,86 @@ Model fields: {json.dumps({k: str(v) for k, v in self.func_spec.model_fields.ite
 ----------------
 {error_prompt}
 """
+    
+    @staticmethod
+    def generate_schema_prompt(model_class: Type[BaseModel], 
+                              func_name: Optional[str] = None, 
+                              func_docstring: Optional[str] = None) -> str:
+        """
+        Generate a prompt for SQL schema generation from Pydantic model.
+        
+        Args:
+            model_class: Pydantic model class to generate schema for
+            func_name: Optional function name for context
+            func_docstring: Optional function docstring for context
+        
+        Returns:
+            str: Prompt for schema generation
+        """
+        if not model_class or not (inspect.isclass(model_class) and issubclass(model_class, BaseModel)):
+            raise ValueError("A valid Pydantic model class is required for schema generation")
+        
+        # Extract model information
+        model_info = {
+            'name': model_class.__name__,
+            'fields': {}
+        }
+        
+        for field_name, field_info in model_class.model_fields.items():
+            field_type = field_info.annotation
+            model_info['fields'][field_name] = {
+                'type': str(field_type),
+                'required': field_info.is_required(),
+                'default': field_info.default if field_info.default is not None else None
+            }
+        
+        prompt = f"""
+{DEFAULT_SCHEMA_SYSTEM_PROMPT}
+
+Generate a CREATE TABLE statement for the following Pydantic model:
+"""
+        
+        if func_name:
+            prompt += f"\nFunction Name: {func_name}"
+        if func_docstring:
+            prompt += f"\nFunction Docstring: {func_docstring}"
+        
+        prompt += f"""
+
+Model Name: {model_info['name']}
+Fields:
+"""
+        
+        for field_name, field_details in model_info['fields'].items():
+            prompt += f"- {field_name}: {field_details['type']} (required: {field_details['required']})\n"
+        
+        prompt += f"\nTable name should be: {model_class.__name__.lower()}s"
+        prompt += "\n\nGenerate only the SQL CREATE TABLE statement."
+        
+        return prompt
+
+    def generate_schema_prompt_from_function(self) -> str:
+        """
+        Generate a schema prompt using the function spec to extract the model.
+        
+        Returns:
+            str: Prompt for schema generation
+        """
+        # Try to extract model from function parameters
+        model_class = None
+        
+        for param_name, param in self.func_spec.signature.parameters.items():
+            if param.annotation != param.empty:
+                if (inspect.isclass(param.annotation) and 
+                    issubclass(param.annotation, BaseModel)):
+                    model_class = param.annotation
+                    break
+        
+        if not model_class:
+            raise ValueError("No Pydantic model class found in function signature")
+        
+        return self.generate_schema_prompt(
+            model_class=model_class,
+            func_name=self.func_spec.name,
+            func_docstring=self.func_spec.docstring
+        )
