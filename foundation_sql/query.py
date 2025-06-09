@@ -62,15 +62,15 @@ class SQLQueryDecorator:
         self.name = name
         self.regen = regen
         self.cache_dir = cache_dir
-        self.schema = schema or self.load_file(schema_path)
+        self.schema = schema or self._load_file(schema_path) if schema_path else None
         if system_prompt or system_prompt_path:
-            self.system_prompt = system_prompt or self.load_file(system_prompt_path)
+            self.system_prompt = system_prompt or self._load_file(system_prompt_path)
         else:
             self.system_prompt = DEFAULT_SYSTEM_PROMPT
 
         self.db_url = db_url
         if not self.db_url:
-            raise ValueError(f"Database URL not provided either through constructor or {db_url_env} environment variable")
+            raise ValueError(f"Database URL not provided either through constructor or environment variable")
         
         # Initialize cache and SQL generator
         self.cache = SQLTemplateCache(cache_dir=cache_dir)
@@ -83,6 +83,19 @@ class SQLQueryDecorator:
 
         self.repair = repair
 
+    @staticmethod
+    def _load_file(path: str) -> str:
+        """
+        Load file content from path.
+        
+        Returns:
+            str: File content
+        """
+        if not path or not os.path.exists(path):
+            raise FileNotFoundError(f"File not found at {path}")
+
+        with open(path, 'r') as f:
+            return f.read()
         
     def __call__(self, func: Callable) -> Callable:
         """
@@ -107,7 +120,6 @@ class SQLQueryDecorator:
             template_name, 
             self.system_prompt, 
             self.schema)
-
 
         def sql_gen(kwargs: Dict[str, Any], error: Optional[str]=None, prev_template: Optional[str]=None):
             if self.regen or not self.cache.exists(template_name) or error:
@@ -144,29 +156,14 @@ class SQLQueryDecorator:
         return wrapper
 
 
-    
-    def load_file(self, path: str) -> str:
-        """
-        Load predefined table schemas.
-        
-        Returns:
-            str: SQL schema definitions
-        """
-        if not path or not os.path.exists(path):
-            raise FileNotFoundError(f"Schema file not found at {path}")
-
-        with open(path, 'r') as f:
-            return f.read()
-
 class SQLTableSchemaDecorator:
     """
-    Advanced decorator for generating and managing SQL table schemas with comprehensive features.
+    Decorator for generating SQL table schemas from Pydantic models.
     
     Supports:
     - Dynamic SQL schema generation from Pydantic models
     - Configurable LLM backend for schema generation
     - Persistent schema caching
-    - Robust error handling and regeneration
     - Schema validation and repair
     """
     
@@ -174,10 +171,6 @@ class SQLTableSchemaDecorator:
                  name: Optional[str] = None,
                  regen: Optional[bool] = None,
                  repair: Optional[int] = 0,
-                 schema: Optional[str] = None,
-                 schema_path: Optional[str] = None,
-                 system_prompt: Optional[str] = None,
-                 system_prompt_path: Optional[str] = None,
                  db_url: Optional[str] = None,
                  api_key: Optional[str] = None,
                  base_url: Optional[str] = None,
@@ -185,16 +178,22 @@ class SQLTableSchemaDecorator:
                  cache_dir: str = '__sql__'):
         """
         Initialize the SQL table schema decorator.
+        
+        Args:
+            name: Optional name for the schema
+            regen: Whether to regenerate the schema
+            repair: Number of repair attempts
+            db_url: Database URL for validation
+            api_key: API key for LLM service
+            base_url: Base URL for LLM service
+            model: Model name for LLM service
+            cache_dir: Directory to cache generated schemas
         """
         self.name = name
         self.regen = regen
-        self.repair = repair
+        self.repair = repair or 0
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
-        self.schema = schema or SQLQueryDecorator.load_file(schema_path)
-
-        if system_prompt or system_prompt_path:
-            self.system_prompt = system_prompt or SQLQueryDecorator.load_file(system_prompt_path)
         
         self.db_url = db_url
         self.cache = SQLTemplateCache(cache_dir=cache_dir)
@@ -247,18 +246,28 @@ class SQLTableSchemaDecorator:
         
         Returns:
             str: Generated SQL CREATE TABLE statement
+            
+        Raises:
+            ValueError: If no SQL generator is available or schema generation fails
         """
         if not self.sql_generator:
             raise ValueError("No SQL generator available to create schema from model.")
         
-        # Use the static method from SQLPromptGenerator
-        prompt = SQLPromptGenerator.generate_schema_prompt(
-            model_class=model_class,
-            func_name=func_name,
-            func_docstring=func_docstring
-        )
-
-        return self.sql_generator.generate_sql(prompt)
+        try:
+            # Generate the schema prompt using the static method from SQLPromptGenerator
+            prompt = SQLPromptGenerator.generate_schema_prompt(
+                model_class=model_class,
+                func_name=func_name,
+                func_docstring=func_docstring
+            )
+            
+            # Generate the SQL schema
+            sql_schema = self.sql_generator.generate_sql(prompt)
+            
+            return sql_schema
+            
+        except Exception as e:
+            raise ValueError(f"Failed to generate schema: {str(e)}")
 
     def _validate_schema(self, sql_schema: str) -> None:
         """
@@ -296,18 +305,22 @@ class SQLTableSchemaDecorator:
 
         def load_or_generate_schema():
             """Load existing schema or generate a new one if not cached."""
-            if self.schema:
-                return self.schema
-            elif not self.regen and self.cache.exists(schema_name):
+            # Check cache first if not regenerating
+            if not self.regen and self.cache and self.cache.exists(schema_name):
                 return self.cache.get(schema_name)
-            else:
+            
+            # Generate schema from model if we have a generator
+            if self.sql_generator:
                 sql_schema = self._generate_schema_from_model(
                     model_class, 
                     func_spec.name, 
                     func_spec.docstring
                 )
-                self.cache.set(schema_name, sql_schema)
+                if self.cache:
+                    self.cache.set(schema_name, sql_schema)
                 return sql_schema
+            else:
+                raise ValueError("No SQL generator available")
         
         # Generate and validate schema with retry logic
         error, sql_schema = None, None
@@ -330,7 +343,7 @@ class SQLTableSchemaDecorator:
                     raise ValueError(f"Schema validation failed after {self.repair} attempts: {error}")
                 
                 # Clear cache and try again
-                if self.cache.exists(schema_name):
+                if self.cache and self.cache.exists(schema_name):
                     self.cache.clear(schema_name)
 
         @functools.wraps(func)
