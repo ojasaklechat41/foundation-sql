@@ -4,3 +4,4 @@ sqlalchemy
 jinja2sql
 pydantic
 openai
+jinja2

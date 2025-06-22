@@ -1,0 +1,22 @@
+{{ system_prompt }}
+
+Generate a CREATE TABLE statement for the following Pydantic model:
+
+{% if func_name %}
+Function Name: {{ func_name }}
+{% endif %}
+
+{% if func_docstring %}
+Function Docstring: {{ func_docstring }}
+{% endif %}
+
+Model Name: {{ model_info.name }}
+
+Fields:
+{% for field_name, field_details in model_info.fields.items() %}
+- {{ field_name }}: {{ field_details.type }} (required: {{ field_details.required }}{% if field_details.default is not none %}, default: {{ field_details.default }}{% endif %})
+{% endfor %}
+
+Table name should be: {{ model_info.table_name }}
+
+Generate only the SQL CREATE TABLE statement.

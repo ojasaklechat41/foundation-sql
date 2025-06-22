@@ -1,0 +1,44 @@
+{{ system_prompt }}
+
+# Database Schema
+{% if schema %}
+Available Tables:
+{{ schema }}
+{% endif %}
+
+# Function Information
+Function: {{ func_spec.name }}
+Signature: {{ func_spec.signature }}
+Docstring: {{ func_spec.docstring }}
+
+# Input Parameters
+{% if kwargs %}
+Input Values:
+{% for key, value in kwargs.items() %}
+- {{ key }}: {{ value | tojson }}
+{% endfor %}
+{% endif %}
+
+# Return Type
+Return Type: {{ func_spec.return_type.__name__ }}
+{% if func_spec.model_fields %}
+Expected Fields:
+{% for field, type_info in func_spec.model_fields.items() %}
+- {{ field }}: {{ type_info }}
+{% endfor %}
+{% endif %}
+
+{% if error and prev_template %}
+# Error Context
+Previous SQL that caused an error:
+```sql
+{{ prev_template }}
+```
+
+Error encountered:
+{{ error }}
+
+Please fix the SQL query to resolve the above error.
+{% else %}
+Please generate a SQL query that matches the function's purpose and return type.
+{% endif %}

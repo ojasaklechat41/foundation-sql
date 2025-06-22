@@ -15,7 +15,7 @@ from typing import Callable, Dict, Optional
 
 from importlib import resources as impresources
 
-DEFAULT_SYSTEM_PROMPT = impresources.read_text('foundation_sql', 'prompts.md')
+DEFAULT_SYSTEM_PROMPT = impresources.read_text('foundation_sql/prompts', 'prompts.md')
 
 
 class SQLQueryDecorator:
@@ -155,7 +155,6 @@ class SQLQueryDecorator:
             
         return wrapper
 
-
 class SQLTableSchemaDecorator:
     """
     Decorator for generating SQL table schemas from Pydantic models.
@@ -175,6 +174,7 @@ class SQLTableSchemaDecorator:
                  api_key: Optional[str] = None,
                  base_url: Optional[str] = None,
                  model: Optional[str] = None,
+                 system_prompt: Optional[str] = None,
                  cache_dir: str = '__sql__'):
         """
         Initialize the SQL table schema decorator.
@@ -187,6 +187,7 @@ class SQLTableSchemaDecorator:
             api_key: API key for LLM service
             base_url: Base URL for LLM service
             model: Model name for LLM service
+            system_prompt: System prompt for LLM service
             cache_dir: Directory to cache generated schemas
         """
         self.name = name
@@ -197,6 +198,7 @@ class SQLTableSchemaDecorator:
         
         self.db_url = db_url
         self.cache = SQLTemplateCache(cache_dir=cache_dir)
+        self.system_prompt = system_prompt
 
         if api_key and base_url:
             self.sql_generator = SQLGenerator(
@@ -258,7 +260,8 @@ class SQLTableSchemaDecorator:
             prompt = SQLPromptGenerator.generate_schema_prompt(
                 model_class=model_class,
                 func_name=func_name,
-                func_docstring=func_docstring
+                func_docstring=func_docstring,
+                system_prompt=self.system_prompt
             )
             
             # Generate the SQL schema
@@ -292,7 +295,7 @@ class SQLTableSchemaDecorator:
     def __call__(self, func: Callable) -> Callable:
         """
         Decorator implementation for SQL schema generation and attachment.
-        
+            
         Args:
             func (Callable): Function to be decorated
         
