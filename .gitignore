@@ -37,4 +37,5 @@ ENV/
 # Misc
 .DS_Store
 
+# SQL
 __sql__

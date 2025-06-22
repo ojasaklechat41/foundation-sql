@@ -10,7 +10,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from pydantic import BaseModel
 
 # Add this constant at the top
-DEFAULT_SCHEMA_SYSTEM_PROMPT = impresources.read_text('foundation_sql/prompts', 'SQL_Schema.md')
+DEFAULT_SCHEMA_SYSTEM_PROMPT = impresources.read_text('foundation_sql.prompts', 'SQL_Schema.md')
 
 class FunctionSpec:
 
@@ -160,12 +160,23 @@ class SQLPromptGenerator:
         env = self._get_environment()
         template = env.get_template('query_prompt.j2')
         
+        # Serialize kwargs to handle Pydantic models properly
+        serialized_kwargs = {}
+        for key, value in kwargs.items():
+            if isinstance(value, BaseModel):
+                # Use the existing serialization logic
+                serialized_kwargs[key] = value.model_dump(mode="json")
+            elif isinstance(value, datetime):
+                serialized_kwargs[key] = value.isoformat()
+            else:
+                serialized_kwargs[key] = value
+        
         # Render the template with the context
         return template.render(
             system_prompt=self.system_prompt,
             schema=self.schema,
             func_spec=self.func_spec,
-            kwargs=kwargs,
+            kwargs=serialized_kwargs,
             error=error,
             prev_template=prev_template
         )

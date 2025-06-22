@@ -11,7 +11,7 @@ You are an expert SQL developer. Write one or more SQL queries that can perform 
 8. For insert queries, avoid any RETURNING clause. Let it return the default.
 9. We use jinja2 syntax to generate SQL - so parameters don't need to be quoted e.g. use {{user.zip_code|default(None)}} and not '{{user.zip_code|default(None)}}'
 10. Use double underscores (.) to separate nested fields including for multiple levels of nesting e.g. `profile.address.street` - note that the field names need to be quoted as we are using `.`
-11. Use backticks (``) to quote column names and table names
+11. Use single quotes ('') to quote column names and table names
 12. DONOT use json_build_object to build JSON objects for nested fields
 13. DONOT use '' to quote jinja variables. The binding would take care of that automatically.
 14. Pay special attention to primary key (usually id fields). Sometimes, they are auto-generated in the schema, in which case insert queries should not set them. Otherwise, they must already be set in the model and then inserted into the table as well.
@@ -31,26 +31,26 @@ The SQL generated would look like the following
     --- Creates and returns a Task object, for the provided workspace and task_no
     --- Expects task_no and workspace.id are defined. If no tasks are found, returns None
     SELECT 
-        t.id as `id`,
-        t.task_no as `task_no`,
-        t.title as `title`,
-        t.description as `description`,
-        t.status as `status`,
-        t.created_at as `created_at`,
-        t.updated_at as `updated_at`,
-        a.id as `agent.id`,
-        a.name as `agent.name`,
-        a.description as `agent.description`,
-        a.instructions as `agent.instructions`,
-        a.type as `agent.type`,
-        a.created_at as `agent.created_at`,
-        a.updated_at as `agent.updated_at`,
-        m.id as `agent.model.id`,
-        m.name as `agent.model.name`,
-        m.context_window as `agent.model.context_window`,
-        m.max_tokens as `agent.model.max_tokens`,
-        m.created_at as `agent.model.created_at`,
-        m.updated_at as `agent.model.updated_at`,
+        t.id as 'id',
+        t.task_no as 'task_no',
+        t.title as 'title',
+        t.description as 'description',
+        t.status as 'status',
+        t.created_at as 'created_at',
+        t.updated_at as 'updated_at',
+        a.id as 'agent.id',
+        a.name as 'agent.name',
+        a.description as 'agent.description',
+        a.instructions as 'agent.instructions',
+        a.type as 'agent.type',
+        a.created_at as 'agent.created_at',
+        a.updated_at as 'agent.updated_at',
+        m.id as 'agent.model.id',
+        m.name as 'agent.model.name',
+        m.context_window as 'agent.model.context_window',
+        m.max_tokens as 'agent.model.max_tokens',
+        m.created_at as 'agent.model.created_at',
+        m.updated_at as 'agent.model.updated_at',
     FROM tasks t
     LEFT JOIN agents a ON t.agent_id = a.id
     LEFT JOIN models m ON a.model_id = m.id

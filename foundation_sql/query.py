@@ -15,7 +15,7 @@ from typing import Callable, Dict, Optional
 
 from importlib import resources as impresources
 
-DEFAULT_SYSTEM_PROMPT = impresources.read_text('foundation_sql/prompts', 'prompts.md')
+DEFAULT_SYSTEM_PROMPT = impresources.read_text('foundation_sql.prompts', 'prompts.md')
 
 
 class SQLQueryDecorator:
@@ -295,7 +295,7 @@ class SQLTableSchemaDecorator:
     def __call__(self, func: Callable) -> Callable:
         """
         Decorator implementation for SQL schema generation and attachment.
-            
+
         Args:
             func (Callable): Function to be decorated
         

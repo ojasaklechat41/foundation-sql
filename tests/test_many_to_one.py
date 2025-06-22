@@ -31,9 +31,16 @@ CREATE TABLE IF NOT EXISTS tasks (
 query = common.create_query(schema=TABLES_SCHEMA)
 
 @query
-def create_workspace(name: str) -> Workspace:
+def insert_workspace(name: str) -> int:
     """
-    Inserts a new workspace and returns the Workspace object.
+    Inserts a new workspace and returns the workspace ID.
+    """
+    pass
+
+@query
+def get_workspace_by_id(workspace_id: int) -> Workspace:
+    """
+    Gets a workspace by its ID.
     """
     pass
 
@@ -51,6 +58,14 @@ def get_tasks_for_workspace(workspace: Workspace) -> List[Task]:
     """
     pass
 
+def create_workspace(name: str) -> Workspace:
+    """
+    Creates a workspace and returns the Workspace object.
+    This is a helper function that combines insert + fetch.
+    """
+    workspace_id = insert_workspace(name=name)
+    return get_workspace_by_id(workspace_id=workspace_id)
+
 class TestWorkspaceTasks(common.DatabaseTests):
     schema_sql = TABLES_SCHEMA
 
@@ -58,12 +73,15 @@ class TestWorkspaceTasks(common.DatabaseTests):
         # Add a workspace
         ws = create_workspace(name="Project Alpha")
         self.assertIsInstance(ws, Workspace)
+        self.assertEqual(ws.name, "Project Alpha")
+        self.assertIsNotNone(ws.id)
+        self.assertGreater(ws.id, 0)
 
         # Add tasks
-        task1 = add_task_to_workspace(workspace=ws, title="Setup repo", description="Initialize git repository")
-        task2 = add_task_to_workspace(workspace=ws, title="Write docs", description="Document the setup process")
-        self.assertIsInstance(task1, Task)
-        self.assertIsInstance(task2, Task)
+        task1_id = add_task_to_workspace(workspace=ws, title="Setup repo", description="Initialize git repository")
+        task2_id = add_task_to_workspace(workspace=ws, title="Write docs", description="Document the setup process")
+        self.assertIsInstance(task1_id, int)
+        self.assertIsInstance(task2_id, int)
 
         # Fetch tasks
         tasks = get_tasks_for_workspace(workspace=ws)

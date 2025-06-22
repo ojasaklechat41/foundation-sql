@@ -1,4 +1,7 @@
 import os
+import shutil
+import tempfile
+from pathlib import Path
 from typing import Optional
 from datetime import datetime
 from enum import Enum
@@ -36,6 +39,20 @@ class Product(BaseModel):
     is_active: bool = True
 
 class TestSQLTableSchemaDecorator(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        """Set up class-level test environment."""
+        # Create a temporary directory for test templates
+        cls.test_templates_dir = Path(tempfile.mkdtemp(prefix='foundation_sql_test_templates_'))
+        
+        # Copy template files to the test directory
+        package_templates_dir = Path(__file__).parent.parent / "foundation_sql" / "templates"
+        for template_file in package_templates_dir.glob("*.j2"):
+            shutil.copy(template_file, cls.test_templates_dir)
+        
+        # Set the template directory for tests
+        os.environ["FOUNDATION_SQL_TEMPLATE_DIR"] = str(cls.test_templates_dir)
+    
     def setUp(self):
         """Set up test environment."""
         # Get environment variables
@@ -64,6 +81,13 @@ class TestSQLTableSchemaDecorator(unittest.TestCase):
         for _, connection in common.db.DATABASES.items():
             connection.get_engine().dispose()
         common.db.DATABASES.clear()
+
+    @classmethod
+    def tearDownClass(cls):
+        """Clean up class-level test environment."""
+        # Clean up test templates directory
+        if hasattr(cls, 'test_templates_dir') and cls.test_templates_dir.exists():
+            shutil.rmtree(cls.test_templates_dir)
 
     def test_decorator_usage_pattern(self):
         """Test the decorator usage pattern shown in the example."""
