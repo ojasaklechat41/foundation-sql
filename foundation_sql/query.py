@@ -209,33 +209,18 @@ class SQLTableSchemaDecorator:
         else:
             self.sql_generator = None
     
-    def _extract_model_from_function(self, func: Callable) -> Type[BaseModel]:
+    def _validate_model_class(self, model_class: Type[BaseModel]) -> None:
         """
-        Extract the Pydantic model from a function's type annotations.
+        Validate that the provided class is a Pydantic model.
         
         Args:
-            func (Callable): Function to extract model from
-        
-        Returns:
-            Type[BaseModel]: Pydantic model class
+            model_class: Class to validate
+            
+        Raises:
+            TypeError: If the class is not a Pydantic model
         """
-        sig = inspect.signature(func)
-
-        # Look for Pydantic model in parameters
-        for param_name, param in sig.parameters.items():
-            if param.annotation != param.empty:
-                # Check if it's a Pydantic model class
-                if (inspect.isclass(param.annotation) and 
-                    issubclass(param.annotation, BaseModel)):
-                    return param.annotation
-        
-        hints = get_type_hints(func)
-        for hint_name, hint_type in hints.items():
-            if (inspect.isclass(hint_type) and 
-                issubclass(hint_type, BaseModel)):
-                return hint_type
-        
-        raise ValueError(f"No Pydantic model found in function annotations for {func.__name__}")
+        if not (inspect.isclass(model_class) and issubclass(model_class, BaseModel)):
+            raise TypeError(f"{model_class.__name__} is not a Pydantic model")
 
     def _generate_schema_from_model(self, model_class: Type[BaseModel], func_name: str, func_docstring: str) -> str:
         """
@@ -292,46 +277,55 @@ class SQLTableSchemaDecorator:
         except Exception as e:
             raise ValueError(f"Schema validation failed: {e}")
         
-    def __call__(self, func: Callable) -> Callable:
+    def __call__(self, model_class: Type[BaseModel]) -> Type[BaseModel]:
         """
-        Decorator implementation for SQL schema generation and attachment.
+        Decorate a Pydantic model class with SQL schema generation capabilities.
 
         Args:
-            func (Callable): Function to be decorated
+            model_class: Pydantic model class to decorate
         
         Returns:
-            Callable: Wrapped function with SQL schema attached
+            The decorated class with SQL schema generation capabilities
         """
-        schema_name = self.name or f"{func.__name__}_schema.sql"
-        model_class = self._extract_model_from_function(func)
-        func_spec = FunctionSpec(func)
-
-        def load_or_generate_schema():
+        self._validate_model_class(model_class)
+        schema_name = self.name or f"{model_class.__name__.lower()}_schema.sql"
+        
+        # Store references for closure
+        decorator_instance = self
+        
+        def get_schema() -> str:
             """Load existing schema or generate a new one if not cached."""
-            # Check cache first if not regenerating
-            if not self.regen and self.cache and self.cache.exists(schema_name):
-                return self.cache.get(schema_name)
+            # Check if schema is already cached on the class instance
+            if hasattr(model_class, '__sql_schema__') and not decorator_instance.regen:
+                return model_class.__sql_schema__
+                
+            # Check file cache if not regenerating
+            if not decorator_instance.regen and decorator_instance.cache.exists(schema_name):
+                schema = decorator_instance.cache.get(schema_name)
+                model_class.__sql_schema__ = schema
+                return schema
             
             # Generate schema from model if we have a generator
-            if self.sql_generator:
-                sql_schema = self._generate_schema_from_model(
-                    model_class, 
-                    func_spec.name, 
-                    func_spec.docstring
+            if decorator_instance.sql_generator:
+                sql_schema = decorator_instance._generate_schema_from_model(
+                    model_class=model_class,
+                    func_name=model_class.__name__,
+                    func_docstring=model_class.__doc__ or ""
                 )
-                if self.cache:
-                    self.cache.set(schema_name, sql_schema)
+                if decorator_instance.cache:
+                    decorator_instance.cache.set(schema_name, sql_schema)
+                model_class.__sql_schema__ = sql_schema
                 return sql_schema
             else:
                 raise ValueError("No SQL generator available")
         
         # Generate and validate schema with retry logic
-        error, sql_schema = None, None
+        sql_schema = None
         attempt = 0
 
         while attempt <= self.repair:
             try:
-                sql_schema = load_or_generate_schema()
+                sql_schema = get_schema()
                 
                 # Validate schema if db_url is provided
                 if self.db_url and sql_schema:
@@ -348,20 +342,19 @@ class SQLTableSchemaDecorator:
                 # Clear cache and try again
                 if self.cache and self.cache.exists(schema_name):
                     self.cache.clear(schema_name)
-
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            """
-            Wrapped function that returns the generated SQL schema.
-            
-            Returns:
-                str: The generated SQL schema
-            """
-            return sql_schema
-
-        # Attach useful attributes to the wrapper
-        wrapper.sql_schema = sql_schema
-        wrapper.model_class = model_class
-        wrapper.func_spec = func_spec
-
-        return wrapper
+                # Also clear the class attribute
+                if hasattr(model_class, '__sql_schema__'):
+                    delattr(model_class, '__sql_schema__')
+        
+        # Attach schema and metadata to the class
+        model_class.__sql_schema__ = sql_schema
+        
+        # Create a method that always returns the cached schema
+        def get_sql_schema_method():
+            if hasattr(model_class, '__sql_schema__'):
+                return model_class.__sql_schema__
+            return get_schema()
+        
+        model_class.get_sql_schema = staticmethod(get_sql_schema_method)
+        
+        return model_class
