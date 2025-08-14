@@ -70,8 +70,17 @@ class Database:
         with self.engine.begin() as conn:
             try:
                 for statement in schema_sql.split(';'):
-                    if statement.strip():
-                        conn.execute(text(statement))
+                    stmt = statement.strip()
+                    if not stmt:
+                        continue
+                    try:
+                        conn.execute(text(stmt))
+                    except SQLAlchemyError as e:
+                        # For idempotency: ignore 'already exists' errors on CREATE
+                        msg = str(e).lower()
+                        if 'already exists' in msg or 'exists' in msg:
+                            continue
+                        raise
             except SQLAlchemyError as e:
                 raise RuntimeError(f'Failed to initialize schema: {str(e)}') from e
 

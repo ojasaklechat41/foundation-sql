@@ -1,22 +1,68 @@
 {{ system_prompt }}
 
-Generate a CREATE TABLE statement for the following Pydantic model:
+# Goal
+Generate SQL schema (DDL) for the described Pydantic model and its nested structures.
 
+# Context
 {% if func_name %}
 Function Name: {{ func_name }}
 {% endif %}
-
 {% if func_docstring %}
 Function Docstring: {{ func_docstring }}
 {% endif %}
 
+Target DB Backend: {{ db_backend or 'generic' }}
+Nested Strategy: {{ nested_strategy }}  {# "tables" or "json" #}
+
+# Root Model
 Model Name: {{ model_info.name }}
+Desired Table Name: {{ model_info.table_name }}
 
 Fields:
 {% for field_name, field_details in model_info.fields.items() %}
 - {{ field_name }}: {{ field_details.type }} (required: {{ field_details.required }}{% if field_details.default is not none %}, default: {{ field_details.default }}{% endif %})
 {% endfor %}
 
-Table name should be: {{ model_info.table_name }}
+# Related Models (Nested)
+{% if model_info.related_models %}
+The following nested models are present:
+{% for rm in model_info.related_models %}
+- {{ rm.name }} (suggested table: {{ rm.table_name }})
+  {% for fname, fdet in rm.fields.items() %}
+  - {{ fname }}: {{ fdet.type }} (required: {{ fdet.required }}{% if fdet.default is not none %}, default: {{ fdet.default }}{% endif %})
+  {% endfor %}
+{% endfor %}
+{% else %}
+No nested Pydantic models.
+{% endif %}
 
-Generate only the SQL CREATE TABLE statement.
+# Enums
+{% if model_info.enums %}
+The following enums are referenced:
+{% for en in model_info.enums %}
+- {{ en['name'] }}: {{ en['values'] | tojson }}
+{% endfor %}
+{% else %}
+No enums.
+{% endif %}
+
+# Requirements
+1. Use appropriate column types and constraints for {{ db_backend or 'the target database' }}.
+   - If sqlite: represent enums with CHECK constraints; JSON as TEXT.
+   - If postgres: enums may be CREATE TYPE or CHECK; JSON fields as JSONB.
+   - If mysql: use ENUM where appropriate; JSON fields as JSON.
+2. Primary key should be present for each created table.
+3. Timestamps should use appropriate types (e.g., TIMESTAMP) with sensible defaults if applicable.
+4. Names should be snake_case.
+
+# Nesting Strategy Instructions
+{% if nested_strategy == 'tables' %}
+- Create a table for the root model: {{ model_info.table_name }}.
+- For each nested model, create its own table (as listed above) and establish foreign key relationships back to the root (or appropriate parent) using clearly named FK columns (e.g., <parent>_id).
+- Choose deterministic table and column names.
+{% elif nested_strategy == 'json' %}
+- Embed nested model fields as a single JSON column on the root table (e.g., <nested_name>_json), using TEXT/JSON type depending on backend.
+{% endif %}
+
+# Output
+Return only the SQL DDL statements necessary to create the required table(s). If multiple tables are required (nested_strategy=tables), output multiple CREATE statements in a valid order.

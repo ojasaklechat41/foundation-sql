@@ -48,6 +48,14 @@ class SQLQueryDecorator:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         model: Optional[str] = None,
+
+        auto_schema: bool = False,
+        schema_regen: Optional[bool] = None,
+        schema_validate: bool = True,
+        nested_strategy: str = "tables",
+        table_name: Optional[str] = None,
+        schema_cache_namespace: Optional[str] = None,
+        schema_models: Optional[list] = None,
     ):
         """
         Initialize the SQL query decorator.
@@ -82,6 +90,14 @@ class SQLQueryDecorator:
         )
 
         self.repair = repair
+        # Auto-schema config
+        self.auto_schema = auto_schema
+        self.schema_regen = schema_regen if schema_regen is not None else regen
+        self.schema_validate = schema_validate
+        self.nested_strategy = nested_strategy
+        self.table_name = table_name
+        self.schema_cache_namespace = schema_cache_namespace
+        self.schema_models = schema_models
 
     @staticmethod
     def _load_file(path: str) -> str:
@@ -113,36 +129,154 @@ class SQLQueryDecorator:
         Returns:
             Callable: Wrapped function with SQL generation and execution logic
         """
-        template_name = self.name or f"{func.__name__}.sql"
+        # Namespace template cache by module to avoid cross-module name collisions
+        default_template_name = f"{func.__module__}.{func.__name__}.sql"
+        template_name = self.name or default_template_name
         fn_spec = FunctionSpec(func)
-        prompt_generator = SQLPromptGenerator(
-            fn_spec, 
-            template_name, 
-            self.system_prompt, 
-            self.schema)
 
-        def sql_gen(kwargs: Dict[str, Any], error: Optional[str]=None, prev_template: Optional[str]=None):
+        # Resolve schema to be used for query prompt. Prefer explicit schema passed at init.
+        explicit_schema = self.schema
+
+        # Helper: infer primary Pydantic model from function signature or provided overrides
+        def _infer_model_class():
+            if self.schema_models:
+                for m in self.schema_models:
+                    try:
+                        if inspect.isclass(m) and issubclass(m, BaseModel):
+                            return m
+                    except Exception:
+                        continue
+            # Fallback: first BaseModel-annotated parameter
+            for param in fn_spec.signature.parameters.values():
+                if param.annotation is not param.empty:
+                    try:
+                        if inspect.isclass(param.annotation) and issubclass(param.annotation, BaseModel):
+                            return param.annotation
+                    except Exception:
+                        continue
+            return None
+
+        # Helper: build schema cache key for this function/model
+        def _schema_cache_key(model_cls: Optional[Type[BaseModel]]):
+            parts = [p for p in [self.schema_cache_namespace, 'schema', func.__module__, func.__name__] if p]
+            # Prefer deterministic table/model based key to maximize reuse across functions when model repeats
+            if model_cls is not None:
+                tbl = self.table_name or f"{model_cls.__name__.lower()}s"
+                parts.append(tbl)
+            return "__".join(parts) + ".sql"
+
+        # Generate and optionally apply schema when auto_schema is enabled and no explicit schema provided
+        auto_schema_text: Optional[str] = None
+
+        def _ensure_schema_generated_and_applied():
+            nonlocal auto_schema_text
+            if explicit_schema is not None or not self.auto_schema:
+                return
+
+            model_cls = _infer_model_class()
+            if model_cls is None:
+                # No model found; nothing to do
+                return
+
+            cache_key = _schema_cache_key(model_cls)
+
+            # Detect DB backend from URL for better prompt guidance
+            def _detect_backend(url: Optional[str]) -> Optional[str]:
+                if not url:
+                    return None
+                u = url.lower()
+                if u.startswith('sqlite'):
+                    return 'sqlite'
+                if u.startswith('postgres') or u.startswith('postgresql'):
+                    return 'postgres'
+                if u.startswith('mysql'):
+                    return 'mysql'
+                return None
+
+            db_backend = _detect_backend(self.db_url)
+            # Use schema_regen policy separate from query regen
+            should_regen = bool(self.schema_regen)
+
+            if not should_regen and self.cache.exists(cache_key):
+                auto_schema_text = self.cache.get(cache_key)
+            else:
+                # Build prompt using SQLPromptGenerator with function spec
+                schema_prompt_gen = SQLPromptGenerator(fn_spec, cache_key, self.system_prompt, None)
+                prompt = schema_prompt_gen.generate_schema_prompt_from_function(
+                    nested_strategy=self.nested_strategy,
+                    table_name=self.table_name,
+                    db_backend=db_backend,
+                )
+                auto_schema_text = self.sql_generator.generate_sql(prompt)
+                self.cache.set(cache_key, auto_schema_text)
+
+            # Apply/validate schema against DB if configured
+            if self.schema_validate and self.db_url and auto_schema_text:
+                attempt = 0
+                while attempt <= (self.repair or 0):
+                    try:
+                        database = db.get_db(self.db_url)
+                        database.init_schema(schema_sql=auto_schema_text)
+                        break
+                    except Exception:
+                        attempt += 1
+                        if attempt > (self.repair or 0):
+                            raise
+                        # Clear and regenerate
+                        if self.cache.exists(cache_key):
+                            self.cache.clear(cache_key)
+                        schema_prompt_gen = SQLPromptGenerator(fn_spec, cache_key, self.system_prompt, None)
+                        prompt = schema_prompt_gen.generate_schema_prompt_from_function(
+                            nested_strategy=self.nested_strategy,
+                            table_name=self.table_name,
+                            db_backend=db_backend,
+                        )
+                        auto_schema_text = self.sql_generator.generate_sql(prompt)
+                        self.cache.set(cache_key, auto_schema_text)
+
+        # Ensure schema is ready (if auto_schema is enabled)
+        _ensure_schema_generated_and_applied()
+
+        # Choose schema for query prompt
+        effective_schema = explicit_schema or auto_schema_text
+
+        prompt_generator = SQLPromptGenerator(
+            fn_spec,
+            template_name,
+            self.system_prompt,
+            effective_schema
+        )
+
+        def sql_gen(kwargs: Dict[str, Any], error: Optional[str] = None, prev_template: Optional[str] = None):
             if self.regen or not self.cache.exists(template_name) or error:
-                
                 prompt = prompt_generator.generate_prompt(kwargs, error, prev_template)
                 sql_template = self.sql_generator.generate_sql(prompt)
                 self.cache.set(template_name, sql_template)
             else:
                 sql_template = self.cache.get(template_name)
-            
             return sql_template
 
         @functools.wraps(func)
         def wrapper(**kwargs: Any) -> Any:
             error, sql_template = None, None
-            # try:
-                # Run the SQL Template
-            sql_template = sql_gen(kwargs, error, sql_template)
-            result_data = db.run_sql(self.db_url, sql_template, **kwargs)
+            # Generate and execute with optional repair loop
+            attempts = 0
+            max_attempts = (self.repair or 0) + 1
+            while attempts < max_attempts:
+                # Generate SQL (with error context if retrying)
+                sql_template = sql_gen(kwargs, error, sql_template)
+                try:
+                    result_data = db.run_sql(self.db_url, sql_template, **kwargs)
+                    break
+                except Exception as e:
+                    attempts += 1
+                    error = str(e)
+                    if attempts >= max_attempts:
+                        raise
 
             if fn_spec.wrapper == 'list':
                 parsed_result = [
-                    db.parse_query_to_pydantic(row, fn_spec.return_type) 
+                    db.parse_query_to_pydantic(row, fn_spec.return_type)
                     for row in result_data.all()
                 ]
             elif isinstance(result_data, int):
@@ -152,209 +286,5 @@ class SQLQueryDecorator:
                 parsed_result = db.parse_query_to_pydantic(first_row, fn_spec.return_type) if first_row else None
 
             return parsed_result
-            
+
         return wrapper
-
-class SQLTableSchemaDecorator:
-    """
-    Decorator for generating SQL table schemas from Pydantic models.
-    
-    Supports:
-    - Dynamic SQL schema generation from Pydantic models
-    - Configurable LLM backend for schema generation
-    - Persistent schema caching
-    - Schema validation and repair
-    """
-    
-    def __init__(self, 
-                 name: Optional[str] = None,
-                 regen: Optional[bool] = None,
-                 repair: Optional[int] = 0,
-                 db_url: Optional[str] = None,
-                 api_key: Optional[str] = None,
-                 base_url: Optional[str] = None,
-                 model: Optional[str] = None,
-                 system_prompt: Optional[str] = None,
-                 cache_dir: str = '__sql__'):
-        """
-        Initialize the SQL table schema decorator.
-        
-        Args:
-            name: Optional name for the schema
-            regen: Whether to regenerate the schema
-            repair: Number of repair attempts
-            db_url: Database URL for validation
-            api_key: API key for LLM service
-            base_url: Base URL for LLM service
-            model: Model name for LLM service
-            system_prompt: System prompt for LLM service
-            cache_dir: Directory to cache generated schemas
-        """
-        self.name = name
-        self.regen = regen
-        self.repair = repair or 0
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(exist_ok=True)
-        
-        self.db_url = db_url
-        self.cache = SQLTemplateCache(cache_dir=cache_dir)
-        self.system_prompt = system_prompt
-
-        if api_key and base_url:
-            self.sql_generator = SQLGenerator(
-                api_key=api_key,
-                base_url=base_url,
-                model=model or "llama-3.3-70b-versatile"
-            )
-        else:
-            self.sql_generator = None
-    
-    def _validate_model_class(self, model_class: Type[BaseModel]) -> None:
-        """
-        Validate that the provided class is a Pydantic model.
-        
-        Args:
-            model_class: Class to validate
-            
-        Raises:
-            TypeError: If the class is not a Pydantic model
-        """
-        if not (inspect.isclass(model_class) and issubclass(model_class, BaseModel)):
-            raise TypeError(f"{model_class.__name__} is not a Pydantic model")
-
-    def _generate_schema_from_model(self, model_class: Type[BaseModel], func_name: str, func_docstring: str) -> str:
-        """
-        Generate SQL schema from a Pydantic model.
-        
-        Args:
-            model_class (Type[BaseModel]): Pydantic model class
-            func_name (str): Function name for context
-            func_docstring (str): Function docstring for context
-        
-        Returns:
-            str: Generated SQL CREATE TABLE statement
-            
-        Raises:
-            ValueError: If no SQL generator is available or schema generation fails
-        """
-        if not self.sql_generator:
-            raise ValueError("No SQL generator available to create schema from model.")
-        
-        try:
-            # Generate the schema prompt using the static method from SQLPromptGenerator
-            prompt = SQLPromptGenerator.generate_schema_prompt(
-                model_class=model_class,
-                func_name=func_name,
-                func_docstring=func_docstring,
-                system_prompt=self.system_prompt
-            )
-            
-            # Generate the SQL schema
-            sql_schema = self.sql_generator.generate_sql(prompt)
-            
-            return sql_schema
-            
-        except Exception as e:
-            raise ValueError(f"Failed to generate schema: {str(e)}")
-
-    def _validate_schema(self, sql_schema: str) -> None:
-        """
-        Validate the SQL schema against the database.
-        
-        Args:
-            sql_schema (str): SQL CREATE TABLE statement to validate
-        
-        Raises:
-            ValueError: If schema validation fails
-        """
-        if not self.db_url:
-            return
-        
-        database = db.get_db(self.db_url)
-
-        try:
-            database.init_schema(schema_sql=sql_schema)
-        except Exception as e:
-            raise ValueError(f"Schema validation failed: {e}")
-        
-    def __call__(self, model_class: Type[BaseModel]) -> Type[BaseModel]:
-        """
-        Decorate a Pydantic model class with SQL schema generation capabilities.
-
-        Args:
-            model_class: Pydantic model class to decorate
-        
-        Returns:
-            The decorated class with SQL schema generation capabilities
-        """
-        self._validate_model_class(model_class)
-        schema_name = self.name or f"{model_class.__name__.lower()}_schema.sql"
-        
-        # Store references for closure
-        decorator_instance = self
-        
-        def get_schema() -> str:
-            """Load existing schema or generate a new one if not cached."""
-            # Check if schema is already cached on the class instance
-            if hasattr(model_class, '__sql_schema__') and not decorator_instance.regen:
-                return model_class.__sql_schema__
-                
-            # Check file cache if not regenerating
-            if not decorator_instance.regen and decorator_instance.cache.exists(schema_name):
-                schema = decorator_instance.cache.get(schema_name)
-                model_class.__sql_schema__ = schema
-                return schema
-            
-            # Generate schema from model if we have a generator
-            if decorator_instance.sql_generator:
-                sql_schema = decorator_instance._generate_schema_from_model(
-                    model_class=model_class,
-                    func_name=model_class.__name__,
-                    func_docstring=model_class.__doc__ or ""
-                )
-                if decorator_instance.cache:
-                    decorator_instance.cache.set(schema_name, sql_schema)
-                model_class.__sql_schema__ = sql_schema
-                return sql_schema
-            else:
-                raise ValueError("No SQL generator available")
-        
-        # Generate and validate schema with retry logic
-        sql_schema = None
-        attempt = 0
-
-        while attempt <= self.repair:
-            try:
-                sql_schema = get_schema()
-                
-                # Validate schema if db_url is provided
-                if self.db_url and sql_schema:
-                    self._validate_schema(sql_schema)
-                
-                break
-            except Exception as e:
-                error = str(e)
-                attempt += 1
-                
-                if attempt > self.repair:
-                    raise ValueError(f"Schema validation failed after {self.repair} attempts: {error}")
-                
-                # Clear cache and try again
-                if self.cache and self.cache.exists(schema_name):
-                    self.cache.clear(schema_name)
-                # Also clear the class attribute
-                if hasattr(model_class, '__sql_schema__'):
-                    delattr(model_class, '__sql_schema__')
-        
-        # Attach schema and metadata to the class
-        model_class.__sql_schema__ = sql_schema
-        
-        # Create a method that always returns the cached schema
-        def get_sql_schema_method():
-            if hasattr(model_class, '__sql_schema__'):
-                return model_class.__sql_schema__
-            return get_schema()
-        
-        model_class.get_sql_schema = staticmethod(get_sql_schema_method)
-        
-        return model_class

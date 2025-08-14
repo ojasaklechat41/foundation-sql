@@ -185,7 +185,11 @@ class SQLPromptGenerator:
     def generate_schema_prompt(cls, model_class: Type[BaseModel], 
                               func_name: Optional[str] = None, 
                               func_docstring: Optional[str] = None,
-                              system_prompt: Optional[str] = None) -> str:
+                              system_prompt: Optional[str] = None,
+                              *,
+                              nested_strategy: str = "tables",
+                              table_name: Optional[str] = None,
+                              db_backend: Optional[str] = None) -> str:
         """
         Generate a prompt for SQL schema generation from Pydantic model.
         
@@ -204,17 +208,76 @@ class SQLPromptGenerator:
         # Extract model information
         model_info = {
             'name': model_class.__name__,
-            'table_name': f"{model_class.__name__.lower()}s",
-            'fields': {}
+            'table_name': table_name or f"{model_class.__name__.lower()}s",
+            'fields': {},
+            'related_models': [],
+            'enums': [],
         }
-        
+
+        # Helpers to collect nested models and enums
+        import enum
+        def is_pydantic_model(tp):
+            try:
+                return inspect.isclass(tp) and issubclass(tp, BaseModel)
+            except Exception:
+                return False
+
+        def is_enum(tp):
+            try:
+                return inspect.isclass(tp) and issubclass(tp, enum.Enum)
+            except Exception:
+                return False
+
+        visited_models = set()
+        collected_enums = {}
+
+        def normalize_type(tp):
+            # Unwrap typing like Optional[X], List[X], etc.
+            origin = getattr(tp, '__origin__', None)
+            args = getattr(tp, '__args__', None)
+            if origin is not None and args:
+                # Prefer the first non-None arg
+                return next((a for a in args if a is not type(None)), args[0])
+            return tp
+
+        def collect_model(mcls):
+            if mcls in visited_models:
+                return
+            visited_models.add(mcls)
+            fields = {}
+            for fname, finfo in mcls.model_fields.items():
+                ftype = normalize_type(finfo.annotation)
+                fields[fname] = {
+                    'type': str(ftype),
+                    'required': finfo.is_required(),
+                    'default': finfo.default if finfo.default is not None else None
+                }
+                if is_pydantic_model(ftype):
+                    collect_model(ftype)
+                elif is_enum(ftype):
+                    # Collect enum values
+                    if ftype.__name__ not in collected_enums:
+                        collected_enums[ftype.__name__] = [e.value for e in ftype]
+            return {'name': mcls.__name__, 'fields': fields, 'table_name': f"{mcls.__name__.lower()}s"}
+
+        # Root model fields
         for field_name, field_info in model_class.model_fields.items():
-            field_type = field_info.annotation
+            field_type = normalize_type(field_info.annotation)
             model_info['fields'][field_name] = {
                 'type': str(field_type),
                 'required': field_info.is_required(),
                 'default': field_info.default if field_info.default is not None else None
             }
+            if is_pydantic_model(field_type):
+                nested_info = collect_model(field_type)
+                if nested_info:
+                    model_info['related_models'].append(nested_info)
+            elif is_enum(field_type):
+                if field_type.__name__ not in collected_enums:
+                    collected_enums[field_type.__name__] = [e.value for e in field_type]
+
+        # Enums from recursion
+        model_info['enums'] = [{'name': n, 'values': v} for n, v in collected_enums.items()]
         
         # Get the Jinja2 environment and load the template
         env = cls._get_environment()
@@ -225,10 +288,12 @@ class SQLPromptGenerator:
             system_prompt=system_prompt or DEFAULT_SCHEMA_SYSTEM_PROMPT,
             func_name=func_name,
             func_docstring=func_docstring,
-            model_info=model_info
+            model_info=model_info,
+            nested_strategy=nested_strategy,
+            db_backend=db_backend
         )
 
-    def generate_schema_prompt_from_function(self) -> str:
+    def generate_schema_prompt_from_function(self, *, nested_strategy: str = "tables", table_name: Optional[str] = None, db_backend: Optional[str] = None) -> str:
         """
         Generate a schema prompt using the function spec to extract the model.
         
@@ -252,5 +317,8 @@ class SQLPromptGenerator:
             model_class=model_class,
             func_name=self.func_spec.name,
             func_docstring=self.func_spec.docstring,
-            system_prompt=self.system_prompt
+            system_prompt=self.system_prompt,
+            nested_strategy=nested_strategy,
+            table_name=table_name,
+            db_backend=db_backend,
         )

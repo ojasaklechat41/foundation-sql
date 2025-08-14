@@ -2,8 +2,13 @@
 
 # Database Schema
 {% if schema %}
-Available Tables:
+Available Tables (authoritative):
 {{ schema }}
+
+Rules:
+- Only reference tables and columns that exist in the schema above. Do not invent columns.
+- Use correct join keys and satisfy NOT NULL and FOREIGN KEY constraints.
+- Prefer deterministic, simple SQL that works on SQLite.
 {% endif %}
 
 # Function Information
@@ -40,5 +45,5 @@ Error encountered:
 
 Please fix the SQL query to resolve the above error.
 {% else %}
-Please generate a SQL query that matches the function's purpose and return type.
+Please generate a SQL query that matches the function's purpose and return type, strictly adhering to the provided schema.
 {% endif %}
